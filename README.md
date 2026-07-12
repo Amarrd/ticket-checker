@@ -1,9 +1,9 @@
 # Eurostar Ticket Watcher
 
 Checks a Eurostar search-results URL every 30 minutes via GitHub Actions and
-emails you (via [Resend](https://resend.com)) the first time trains actually
-become **bookable**. Built for watching seasonal *Eurostar Snow* dates that
-aren't on sale yet, but works for any Eurostar route/date.
+emails you (via Gmail SMTP) the first time trains actually become **bookable**.
+Built for watching seasonal *Eurostar Snow* dates that aren't on sale yet, but
+works for any Eurostar route/date.
 
 ## How detection works
 
@@ -45,20 +45,19 @@ run (with `[skip ci]` so it doesn't trigger itself).
 ## Setup
 
 1. **Create a GitHub repo** (private is fine) and push these files.
-2. **Sign up at [resend.com](https://resend.com)** (free tier) and create an API
-   key. Note the email you signed up with — with the default sender
-   (`onboarding@resend.dev`) Resend can only deliver to *that* address unless you
-   verify a custom sending domain.
+2. **Create a Gmail app password.** In your Google account → Security, enable
+   **2-Step Verification**, then go to **App passwords** and generate one (name it
+   e.g. "eurostar-watcher"). You'll get a 16-character password — this is what the
+   watcher uses to send mail, *not* your normal Gmail password. Gmail can send to
+   any recipient, so no custom domain is needed.
 3. **Add repo secrets** (Settings → Secrets and variables → Actions → New
    repository secret):
    - `SEARCH_URL` — the full Eurostar search URL to watch
-   - `RESEND_API_KEY` — your Resend API key
+   - `GMAIL_USER` — the Gmail address to send from (e.g. `you@gmail.com`)
+   - `GMAIL_APP_PASSWORD` — the 16-character app password from step 2
    - `TO_EMAIL` — where to send alerts. One address, or several separated by
-     commas (e.g. `me@example.com, partner@example.com`). Note: with the default
-     `onboarding@resend.dev` sender, Resend only delivers to your Resend signup
-     address — to reach a second recipient you'll need to verify a custom sending
-     domain in Resend.
-   - `FROM_EMAIL` — *optional*, defaults to `onboarding@resend.dev`
+     commas (e.g. `me@example.com, partner@example.com`)
+   - `FROM_EMAIL` — *optional*, display "from" address; defaults to `GMAIL_USER`
 4. **Test the email path now** (before tickets drop) — see below.
 5. **Confirm you're not bot-blocked**: Actions → *Eurostar Ticket Watcher* → *Run
    workflow* (leave "test email" unticked). When it finishes, open the
@@ -70,7 +69,7 @@ run (with `[skip ci]` so it doesn't trigger itself).
 
 **From GitHub:** Actions → *Eurostar Ticket Watcher* → *Run workflow* → tick
 **"Send a test email instead of checking availability"** → Run. This exercises
-the full Actions → secrets → Resend path and sends you a sample email.
+the full Actions → secrets → Gmail path and sends you a sample email.
 
 **Locally:**
 
@@ -79,9 +78,10 @@ pip install -r requirements.txt
 playwright install chromium
 
 export SEARCH_URL='https://www.eurostar.com/search/uk-en?...'
-export RESEND_API_KEY='re_...'
-export TO_EMAIL='you@example.com'
-# export FROM_EMAIL='alerts@yourdomain.com'   # optional
+export GMAIL_USER='you@gmail.com'
+export GMAIL_APP_PASSWORD='abcd efgh ijkl mnop'   # 16-char Gmail app password
+export TO_EMAIL='you@example.com, partner@example.com'
+# export FROM_EMAIL='you@gmail.com'   # optional
 
 python eurostar_watch.py --test-email   # send a sample alert now
 python eurostar_watch.py --dry-run      # run the real check, no email/state write

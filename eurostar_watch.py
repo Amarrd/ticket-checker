@@ -3,7 +3,7 @@ Eurostar (Snow) ticket availability watcher.
 
 Loads a Eurostar search-results URL in a headless browser (the page is a
 JS-rendered Next.js app, so a plain HTTP request only returns an empty shell),
-decides whether trains are actually *bookable*, and emails you via Resend the
+decides whether trains are actually *bookable*, and emails you via Gmail SMTP the
 first time it flips from "not available" to "available". State is persisted in
 state.json (committed back to the repo by the GitHub Actions workflow) so you
 don't get a fresh email every run while tickets remain available.
@@ -23,13 +23,19 @@ A page that fails to render, or is served a captcha wall, is treated as
 "unknown"/"blocked" -- never as "available" -- so a bot block can't produce a
 false alert (and, in the blocked case, sends a distinct heads-up instead).
 
+Alerts are sent over Gmail SMTP, so they can reach any recipient (no custom
+domain needed) -- you just need a Gmail account and an app password.
+
 Required environment variables:
-  SEARCH_URL       Full Eurostar search URL to check
-  RESEND_API_KEY   API key from resend.com
-  TO_EMAIL         Where to send the alert (must match your Resend account
-                    email unless you've verified a custom sending domain)
+  SEARCH_URL           Full Eurostar search URL to check
+  GMAIL_USER           The Gmail address to send from (e.g. you@gmail.com)
+  GMAIL_APP_PASSWORD   A Gmail app password (Google account -> Security ->
+                        2-Step Verification -> App passwords). NOT your normal
+                        Gmail password.
+  TO_EMAIL             Where to send the alert. One address, or several
+                        separated by commas / spaces.
 Optional:
-  FROM_EMAIL       Defaults to onboarding@resend.dev
+  FROM_EMAIL           Display "from" address; defaults to GMAIL_USER.
 
 Usage:
   python eurostar_watch.py               # normal scheduled check
@@ -42,11 +48,12 @@ import asyncio
 import json
 import os
 import re
+import smtplib
 import sys
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 
-import requests
 from playwright.async_api import async_playwright
 
 STATE_FILE = Path("state.json")
@@ -90,15 +97,16 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
 
 
-def _require_env() -> tuple[str, str, str, str]:
+def _require_env() -> tuple[str, str, str, str, str]:
     try:
         search_url = os.environ["SEARCH_URL"]
-        resend_api_key = os.environ["RESEND_API_KEY"]
+        gmail_user = os.environ["GMAIL_USER"]
+        gmail_app_password = os.environ["GMAIL_APP_PASSWORD"]
         to_email = os.environ["TO_EMAIL"]
     except KeyError as exc:
         sys.exit(f"Missing required environment variable: {exc.args[0]}")
-    from_email = os.environ.get("FROM_EMAIL", "onboarding@resend.dev")
-    return search_url, resend_api_key, to_email, from_email
+    from_email = os.environ.get("FROM_EMAIL", gmail_user)
+    return search_url, gmail_user, gmail_app_password, to_email, from_email
 
 
 def _recipients(to_email: str) -> list[str]:
@@ -107,19 +115,22 @@ def _recipients(to_email: str) -> list[str]:
 
 
 def send_email(subject: str, body_html: str) -> None:
-    _, resend_api_key, to_email, from_email = _require_env()
-    resp = requests.post(
-        "https://api.resend.com/emails",
-        headers={"Authorization": f"Bearer {resend_api_key}"},
-        json={
-            "from": from_email,
-            "to": _recipients(to_email),
-            "subject": subject,
-            "html": body_html,
-        },
-        timeout=30,
+    _, gmail_user, gmail_app_password, to_email, from_email = _require_env()
+    recipients = _recipients(to_email)
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = from_email
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(
+        "This alert is HTML-only; please view it in an HTML-capable client."
     )
-    resp.raise_for_status()
+    msg.add_alternative(body_html, subtype="html")
+
+    # Gmail's app-password SMTP over implicit TLS.
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+        server.login(gmail_user, gmail_app_password)
+        server.send_message(msg, from_addr=gmail_user, to_addrs=recipients)
 
 
 async def check_availability(search_url: str) -> dict:
@@ -283,7 +294,7 @@ def send_test_email() -> int:
         subject="✅ Eurostar watcher — test email",
         body_html=(
             "<p>This is a <strong>test email</strong> from the Eurostar ticket "
-            "watcher. If you received this, Resend delivery is working.</p>"
+            "watcher. If you received this, Gmail delivery is working.</p>"
             f"<p>Watching: {search_url}</p>"
             f"<p>Sent at {now_iso()} UTC</p>"
         ),
@@ -310,7 +321,7 @@ def main() -> None:
     if args.test_email:
         sys.exit(send_test_email())
 
-    search_url, _, _, _ = _require_env()
+    search_url = _require_env()[0]
     sys.exit(run_check(search_url, dry_run=args.dry_run))
 
 
