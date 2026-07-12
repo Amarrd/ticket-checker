@@ -1,0 +1,9 @@
+# Debug artifacts produced on each run (uploaded to Actions artifacts instead)
+debug_screenshot.png
+debug_page_text.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

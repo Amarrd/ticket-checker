@@ -1,0 +1,71 @@
+name: Eurostar Ticket Watcher
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may delay this under load)
+  workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Send a test email instead of checking availability"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Avoid overlapping runs racing on the state.json commit.
+concurrency:
+  group: eurostar-watcher
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Send test email
+        if: ${{ inputs.test_email }}
+        env:
+          SEARCH_URL: ${{ secrets.SEARCH_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+        run: python eurostar_watch.py --test-email
+
+      - name: Run availability check
+        if: ${{ !inputs.test_email }}
+        env:
+          SEARCH_URL: ${{ secrets.SEARCH_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+        run: python eurostar_watch.py
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-output
+          path: |
+            debug_screenshot.png
+            debug_page_text.txt
+          retention-days: 3
+
+      - name: Commit updated state
+        if: ${{ !inputs.test_email }}
+        run: |
+          git config user.name "eurostar-watcher-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "Update availability state [skip ci]"
+          git push
