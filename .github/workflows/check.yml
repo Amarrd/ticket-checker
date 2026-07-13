@@ -1,8 +1,9 @@
 name: Eurostar Ticket Watcher
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may delay this under load)
+  # Triggered every 30 min by an external cron (cron-job.org) via the
+  # workflow_dispatch REST endpoint -- GitHub's own `schedule:` cron was
+  # unreliable (runs delayed/skipped for hours), so it was removed.
   workflow_dispatch:
     inputs:
       test_email:
