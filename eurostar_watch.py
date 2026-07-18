@@ -47,9 +47,11 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import re
 import smtplib
 import sys
+import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -71,10 +73,68 @@ CAPTCHA_CONTAINER = '[data-testid="captcha-container"]'
 # Text fallback for the empty state, in case the testid ever changes.
 NEGATIVE_TEXT = "sorry, no trains are available"
 
-USER_AGENT = (
+# Pretend to be a normal desktop Chrome on Windows in the London timezone. The
+# Chrome major version is filled in at runtime from the *actual* bundled
+# Chromium (see _fingerprint) so the UA and the engine never disagree -- a UA
+# that claims a version the browser isn't running is itself a bot tell.
+UA_TEMPLATE = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
 )
+# Fallback Chrome major, only used if the browser version can't be read.
+FALLBACK_CHROME_MAJOR = 130
+TIMEZONE_ID = "Europe/London"
+
+# Max random delay (seconds) added before a check, to break the perfectly
+# regular "every 30 min on the dot" cadence that looks robotic. Override with
+# JITTER_MAX_SECONDS=0 to disable.
+DEFAULT_JITTER_MAX_SECONDS = 300
+
+# If a run comes back blocked, wait this long and try once more before we
+# actually report "blocked" -- a single transient captcha shouldn't fire the
+# heads-up email or clobber state.
+BLOCK_RETRY_DELAY_SECONDS = 45
+
+
+def _chrome_major(version: str) -> int:
+    """Extract the Chrome/Chromium major version from a version string."""
+    m = re.match(r"(\d+)", version or "")
+    return int(m.group(1)) if m else FALLBACK_CHROME_MAJOR
+
+
+def _fingerprint(major: int) -> dict:
+    """Build a self-consistent UA + Client Hints headers for a Chrome major."""
+    user_agent = UA_TEMPLATE.format(major=major)
+    sec_ch_ua = (
+        f'"Chromium";v="{major}", "Google Chrome";v="{major}", '
+        '"Not?A_Brand";v="99"'
+    )
+    headers = {
+        "Accept-Language": "en-GB,en;q=0.9",
+        "sec-ch-ua": sec_ch_ua,
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+    return {"user_agent": user_agent, "headers": headers}
+
+
+# Runs in the page before any site script, so automation tells are gone by the
+# time Eurostar's bot check looks. navigator.webdriver is the headline one.
+STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-GB', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = window.chrome || {runtime: {}};
+"""
+
+
+def _jitter_seconds() -> int:
+    """A random 0..JITTER_MAX_SECONDS delay to desynchronise the cadence."""
+    try:
+        cap = int(os.environ.get("JITTER_MAX_SECONDS", DEFAULT_JITTER_MAX_SECONDS))
+    except ValueError:
+        cap = DEFAULT_JITTER_MAX_SECONDS
+    return random.randint(0, cap) if cap > 0 else 0
 
 
 def now_iso() -> str:
@@ -143,11 +203,17 @@ async def check_availability(search_url: str) -> dict:
         browser = await p.chromium.launch(
             args=["--disable-blink-features=AutomationControlled"]
         )
+        # Match the advertised Chrome version to the engine we're actually
+        # running, then apply Client Hints + timezone that agree with it.
+        fp = _fingerprint(_chrome_major(browser.version))
         context = await browser.new_context(
-            user_agent=USER_AGENT,
+            user_agent=fp["user_agent"],
+            extra_http_headers=fp["headers"],
             locale="en-GB",
+            timezone_id=TIMEZONE_ID,
             viewport={"width": 1400, "height": 1000},
         )
+        await context.add_init_script(STEALTH_INIT_SCRIPT)
         page = await context.new_page()
 
         render_ok = False
@@ -243,8 +309,37 @@ def _blocked_email(search_url: str) -> tuple[str, str]:
     )
 
 
-def run_check(search_url: str, dry_run: bool) -> int:
+def _check_with_retry(search_url: str) -> dict:
+    """Run the check; if blocked, wait and retry once before believing it.
+
+    A lone captcha is often transient (a fresh browser/IP the second time gets
+    through), so we don't want a single wall to fire the heads-up email or
+    overwrite good state.
+    """
     result = asyncio.run(check_availability(search_url))
+    if result["status"] == "blocked":
+        print(
+            f"Got a block; retrying once in {BLOCK_RETRY_DELAY_SECONDS}s "
+            "before reporting it."
+        )
+        time.sleep(BLOCK_RETRY_DELAY_SECONDS)
+        retry = asyncio.run(check_availability(search_url))
+        if retry["status"] != "blocked":
+            print(f"Retry cleared the block (status={retry['status']}).")
+        return retry
+    return result
+
+
+def run_check(search_url: str, dry_run: bool) -> int:
+    # Desynchronise from the clockwork external cron so hits aren't perfectly
+    # periodic. Skipped on --dry-run so manual runs stay snappy.
+    if not dry_run:
+        wait = _jitter_seconds()
+        if wait:
+            print(f"Jitter: sleeping {wait}s before check.")
+            time.sleep(wait)
+
+    result = _check_with_retry(search_url)
     state = load_state()
 
     was_available = state.get("available", False)
