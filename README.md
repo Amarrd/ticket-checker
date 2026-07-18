@@ -96,5 +96,27 @@ python eurostar_watch.py --dry-run      # run the real check, no email/state wri
 - GitHub's free scheduled workflows can run late under load.
 - Scheduled workflows auto-disable after 60 days of repo inactivity — any commit
   or manual run reactivates them.
-- Keep the polling interval reasonable (30 min default). Cranking it much lower
-  risks tripping Eurostar's bot protection.
+- Keep the polling interval reasonable. The schedule lives in the external cron
+  (cron-job.org) that pings the `workflow_dispatch` endpoint, **not** in this
+  repo — dial it back there (e.g. hourly) if you're getting bot-blocked.
+  Cranking it lower risks tripping Eurostar's bot protection.
+
+## Avoiding the bot / captcha wall
+
+Because runs come from GitHub Actions (datacenter IPs) with a headless browser,
+Eurostar's bot protection will sometimes serve a captcha. A few things reduce
+how often that happens:
+
+- **Timing jitter** — each check sleeps a random 0–5 min first, so hits aren't
+  perfectly periodic (a clockwork "every 30 min on the dot" pattern is itself a
+  tell). Tune with the `JITTER_MAX_SECONDS` env var (`0` disables it).
+- **Consistent fingerprint** — the advertised Chrome version, Client Hints
+  (`sec-ch-ua`), `Accept-Language`, and timezone are all derived from / matched
+  to the actual bundled Chromium, and `navigator.webdriver` is masked, so the
+  browser doesn't advertise itself as automated.
+- **Retry before crying wolf** — a run that comes back blocked waits ~45s and
+  retries once; only a *second* block is reported, so a single transient
+  captcha doesn't fire the heads-up email or overwrite good state.
+
+These help, but the ceiling is the datacenter IP: the surest fix if blocks
+persist is lowering frequency (above) or routing through a residential proxy.
